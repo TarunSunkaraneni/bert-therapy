@@ -8,9 +8,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 from .consts import InputExample
+from .single_processor import SingleProcessor
 from .text_processor import filter_text, encode_context
 
-class ContextProcessor(DataProcessor):
+class ContextProcessor(SingleProcessor):
   
   def __init__(self, agent, label_names, task, context_len=1, concat_context=True):
     assert agent == "therapist" or agent == "patient"
@@ -23,16 +24,9 @@ class ContextProcessor(DataProcessor):
     self.context_len = context_len # length of context.
     self.concat_context = concat_context # True or False
 
-  def get_examples(self, data_dir, mode):
-    return self._create_examples(pd.read_json(os.path.join(data_dir, "{}.json".format(mode)), lines=True))
-
-  def get_labels(self):
-    """See base class."""
-    return self.label_names 
-
   def _create_examples(self, df):
     """Creates examples for the training and dev sets.
-       Task type is either forecasting or categorizing"""
+        Task type is either forecasting or categorizing"""
     agent_ids = np.array([entry[0]["speaker"] == self.agent for entry in df["options-for-correct-answers"]], dtype="bool")
     df = df.iloc[agent_ids]
 
@@ -40,14 +34,15 @@ class ContextProcessor(DataProcessor):
     for (_index, row) in df.iterrows():
       guid = row["example-id"]
       utterance = ""
-      """HACK: reversing context so the truncation strategy works in encode_plus"""
-      reversed_context = [filter_text(row["messages-so-far"][-i]["utterance"]) for i in range(self.context_len, 1, -1)]
+      context = [filter_text(row["messages-so-far"][-i]["utterance"]) 
+        for i in range(self.context_len, 1, -1)]
       if self.task == "categorize":
         utterance = filter_text(row["options-for-correct-answers"][0]["utterance"])
       label = row["options-for-correct-answers"][0]["agg_label"]
-      examples.append(InputExample(guid=guid, utterance=utterance, context=reversed_context, label=label))
+      examples.append(InputExample(guid=guid, utterance=utterance, context=context, label=label))
+    print(len(examples))
+    print(examples[0])
     return examples
-
   
 
   def convert_examples_to_features(
@@ -86,9 +81,12 @@ class ContextProcessor(DataProcessor):
       len_examples = len(examples)
       if ex_index % 10000 == 0:
         logger.info("Writing example %d/%d" % (ex_index, len_examples))
-      if not example.utterance.strip():
-        continue
-      utterance = tokenizer.decode(tokenizer.encode(example.utterance))
+      if self.task == 'categorize':
+        if not example.utterance.strip():
+          continue
+        utterance = tokenizer.decode(tokenizer.encode(example.utterance))
+      else:
+        utterance = ""
       etc_token = tokenizer.encode('...', add_special_tokens=False)
       if self.concat_context:
         context = tokenizer.encode(' '.join(example.context))
@@ -100,21 +98,22 @@ class ContextProcessor(DataProcessor):
       else:
         context = encode_context(example.context, len(utterance), max_length, etc_token, tokenizer)
         # we do not need to truncate after this.
-        if self.task == "categorize":
-          inputs = tokenizer.encode_plus(
-            context,
-            utterance,
-            add_special_tokens=False, 
-            max_length=max_length,
-            pad_to_max_length=True,
-            truncation_strategy='do_no_truncate')
-        else:
-          inputs = tokenizer.encode_plus(
-          context, 
+      
+      if self.task == "categorize":
+        inputs = tokenizer.encode_plus(
+          context,
+          utterance,
           add_special_tokens=False, 
           max_length=max_length,
           pad_to_max_length=True,
           truncation_strategy='do_no_truncate')
+      else:
+        inputs = tokenizer.encode_plus(
+        context, 
+        add_special_tokens=False, 
+        max_length=max_length,
+        pad_to_max_length=True,
+        truncation_strategy='do_no_truncate')
       
       input_ids, token_type_ids, attention_mask = inputs["input_ids"], inputs["token_type_ids"], inputs["attention_mask"]
 

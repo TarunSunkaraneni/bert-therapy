@@ -19,6 +19,8 @@ processors = {
   "forecast-patient-single": SingleProcessor("patient", MISC11_P_labels, "forecast"),
   "forecast-therapist-concat": ContextProcessor("therapist", MISC11_T_labels, "forecast", context_len=9, concat_context=True),
   "forecast-patient-concat": ContextProcessor("patient", MISC11_P_labels, "forecast", context_len=9, concat_context=True),
+  "forecast-therapist-speaker": SpeakerContextProcessor("therapist", MISC11_T_labels, "forecast", context_len=9, concat_context=False),
+  "forecast-patient-speaker": SpeakerContextProcessor("patient", MISC11_P_labels, "forecast", context_len=9, concat_context=False),
   ####
   "categorize-therapist-single": SingleProcessor("therapist", MISC11_T_labels, "categorize"),
   "categorize-patient-single": SingleProcessor("patient", MISC11_P_labels, "categorize"),
