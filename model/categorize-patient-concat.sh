@@ -1,13 +1,13 @@
-python modules/run_classifier.py --data_dir /uusoc/scratch/res/arch/students/sunkaraneni/jie/psychotherapy/data/psyc_MISC11_ML_17_padding \
+python modules/run_classifier.py --data_dir ../data/psyc_MISC11_ML_17_padding \
 --model_type roberta \
 --model_name_or_path roberta-base \
 --task_name categorize-patient-concat \
 --num_train_epochs 5 \
---output_dir /uusoc/scratch/res/arch/students/sunkaraneni/jie/psychotherapy/results/categorize-patient-concat \
+--output_dir ../results/categorize-patient-concat \
 --max_seq_length=512 \
 --local_rank -1 \
 --per_gpu_train_batch_size 16 \
---per_gpu_eval_batch_size 16 \
+--per_gpu_eval_batch_size 64 \
 --gradient_accumulation_steps 2 \
 --warmup_steps 400 \
 --do_test \

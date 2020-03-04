@@ -7,7 +7,7 @@ python modules/run_classifier.py --data_dir ../data/psyc_MISC11_ML_17_padding \
 --max_seq_length=512 \
 --local_rank -1 \
 --per_gpu_train_batch_size 16 \
---per_gpu_eval_batch_size 16 \
+--per_gpu_eval_batch_size 64 \
 --gradient_accumulation_steps 2 \
 --warmup_steps 400 \
 --do_test \

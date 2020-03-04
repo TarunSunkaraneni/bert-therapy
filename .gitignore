@@ -1,0 +1,5 @@
+results
+*.pyc
+data
+model/modules/.*.py
+model/runs
