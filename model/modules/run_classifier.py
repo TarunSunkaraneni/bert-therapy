@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
+import torch.nn.functional as F
 from tqdm import tqdm, trange
 
 from transformers import (
@@ -79,7 +80,7 @@ MODEL_CLASSES = {
 
 
 
-from utils import compute_metrics, processors, output_modes
+from utils import compute_metrics, processors, output_modes, logits_masked
 
 
 def set_seed(args):
@@ -180,6 +181,8 @@ def train(args, train_dataset, model, tokenizer):
     epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0],
   )
   set_seed(args)  # Added here for reproductibility
+  
+  combined_model = "both" in args.task_name
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, batch in enumerate(epoch_iterator):
@@ -191,13 +194,22 @@ def train(args, train_dataset, model, tokenizer):
 
       model.train()
       batch = tuple(t.to(args.device) for t in batch)
-      inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+
+      inputs = {"input_ids": batch[0], "attention_mask": batch[1]}
       if args.model_type != "distilbert":
         inputs["token_type_ids"] = (
           batch[2] if args.model_type in ["bert", "xlnet", "albert"] else None
         )  # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_ids
-      outputs = model(**inputs)
-      loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+      if not combined_model:
+        inputs["labels"] = batch[3]
+        outputs = model(**inputs)
+        loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+      else:
+        outputs = model(**inputs)
+        labels = batch[3]
+        logits = outputs[0]  # model outputs are always tuple in transformers (see doc)
+        m_logits = logits_masked(logits, labels, args.task_name)
+        loss = F.cross_entropy(m_logits, labels)
 
       if args.n_gpu > 1:
         loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -301,19 +313,28 @@ def evaluate(args, model, tokenizer, prefix="", mode="dev"):
   nb_eval_steps = 0
   preds = None
   out_label_ids = None
+  combined_model = "both" in args.task_name
   for batch in tqdm(eval_dataloader, desc="Evaluating"):
     model.eval()
     batch = tuple(t.to(args.device) for t in batch)
 
     with torch.no_grad():
-      inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+      inputs = {"input_ids": batch[0], "attention_mask": batch[1]}
       if args.model_type != "distilbert":
         inputs["token_type_ids"] = (
           batch[2] if args.model_type in ["bert", "xlnet", "albert"] else None
         )  # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_ids
-      outputs = model(**inputs)
-      tmp_eval_loss, logits = outputs[:2]
-
+      if not combined_model:
+        inputs["labels"] = batch[3]
+        outputs = model(**inputs)
+        tmp_eval_loss, logits = outputs[:2]  # model outputs are always tuple in transformers (see doc)
+      else:
+        outputs = model(**inputs)
+        labels = batch[3]
+        logits = outputs[0]  # model outputs are always tuple in transformers (see doc)
+        m_logits = logits_masked(logits, labels, args.task_name)
+        tmp_eval_loss = F.cross_entropy(m_logits, labels)
+        inputs["labels"] = labels # For the segment of code below
       eval_loss += tmp_eval_loss.mean().item()
     nb_eval_steps += 1
     if preds is None:
@@ -328,7 +349,7 @@ def evaluate(args, model, tokenizer, prefix="", mode="dev"):
     preds = np.argmax(preds, axis=1)
   elif args.output_mode == "regression":
     preds = np.squeeze(preds)
-  result = compute_metrics(preds, out_label_ids)
+  result = compute_metrics(preds, out_label_ids, processors[args.task_name].get_labels())
   results.update(result)
 
 

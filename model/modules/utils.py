@@ -20,22 +20,33 @@ processors = {
   "forecast-therapist-concat": ContextProcessor("therapist", MISC11_T_labels, "forecast", context_len=9, concat_context=True),
   "forecast-patient-concat": ContextProcessor("patient", MISC11_P_labels, "forecast", context_len=9, concat_context=True),
   "forecast-therapist-speaker": SpeakerContextProcessor("therapist", MISC11_T_labels, "forecast", context_len=9, concat_context=False),
-  "forecast-patient-speaker": SpeakerContextProcessor("patient", MISC11_P_labels, "forecast", context_len=9, concat_context=False),
+  "forecast-patient-speaker": SpeakerContextProcessor("patient", MISC11_P_labels, "forecast", context_len=9, concat_context=False), 
   ####
   "categorize-therapist-single": SingleProcessor("therapist", MISC11_T_labels, "categorize"),
   "categorize-patient-single": SingleProcessor("patient", MISC11_P_labels, "categorize"),
   "categorize-therapist-concat": ContextProcessor("therapist", MISC11_T_labels, "categorize", context_len=9, concat_context=True),
   "categorize-patient-concat": ContextProcessor("patient", MISC11_P_labels, "categorize", context_len=9, concat_context=True),
   "categorize-therapist-speaker": SpeakerContextProcessor("therapist", MISC11_T_labels, "categorize", context_len=9, concat_context=False),
-  "categorize-patient-speaker": SpeakerContextProcessor("patient", MISC11_P_labels, "categorize", context_len=9, concat_context=False)
+  "categorize-patient-speaker": SpeakerContextProcessor("patient", MISC11_P_labels, "categorize", context_len=9, concat_context=False),
+  ####
+  "categorize-both-speaker": SpeakerContextProcessor("both", {"P": MISC11_P_labels, "T": MISC11_T_labels}, "categorize", context_len=9, concat_context=False)
   }
-
 output_modes = defaultdict(lambda: "classification")
 
-def compute_metrics(preds, labels):
+def compute_metrics(preds, labels, label_names):
   results = {"macro": f1_score(labels, preds, average="macro")}
   category_f1s = f1_score(labels, preds, average=None)
-  label_names = MISC11_BRIEF_T_labels if len(category_f1s) > 3 else  MISC11_BRIEF_P_labels
   for cat, score in zip(label_names, category_f1s):
     results[cat] = score
   return results
+
+
+""" Binary multi task logits masker"""
+sep = {"categorize-both-speaker": len(MISC11_P_labels)}
+def logits_masked(logits, labels, task_name):
+  s = sep[task_name]
+  m_logits = logits.clone()
+  m_logits[(labels < s).view((-1, )), s:]= 0
+  m_logits[(labels >= s).view((-1, )), :s] = 0
+  return m_logits
+

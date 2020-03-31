@@ -12,10 +12,19 @@ from .text_processor import filter_text
 class SingleProcessor(DataProcessor):
   
   def __init__(self, agent, label_names, task):
-    assert agent == "therapist" or agent == "patient"
+    assert agent == "therapist" or agent == "patient" or agent == "both"
     assert task == "forecast" or task == "categorize"
-
-    self.agent = 'T' if agent == 'therapist' else 'P'
+    if agent == "both":
+      assert isinstance(label_names, dict)
+    else:
+      assert isinstance(label_names, list)
+    
+    if agent == 'therapist':
+      self.agent = 'T' 
+    elif agent == 'patient':
+      self.agent = 'P'
+    else:
+      self.agent = agent
     self.label_names = label_names
     self.task = task
 
@@ -24,27 +33,37 @@ class SingleProcessor(DataProcessor):
 
   def get_labels(self):
     """See base class."""
-    return self.label_names 
+    if self.agent == "both":
+      # second argument for masking logits in combined model
+      return [label for labels in self.label_names.values() for label in labels]
+    return self.label_names
 
   def _create_examples(self, df):
     """Creates examples for the training and dev sets.
        Task type is either forecasting or categorizing
-       TODO implement forecating"""
-
-    agent_ids = np.array([entry[0]["speaker"] == self.agent for entry in df["options-for-correct-answers"]], dtype="bool")
-    df = df.iloc[agent_ids]
+    """
+    if self.agent != "both":
+      label_offset = defaultdict(int) # always 0
+      agent_ids = np.array([entry[0]["speaker"] == self.agent for entry in df["options-for-correct-answers"]], dtype="bool")
+      df = df.iloc[agent_ids]
+    else:
+      label_offset, offset = {}, 0
+      for agent, labels in self.label_names.items():
+        label_offset[agent] = offset
+        offet += len(labels)
 
     examples = []
     for (_index, row) in df.iterrows():
-      guid = row["example-id"]
-      context, utterance = None, None
+      guid, history, current = row["example-id"], row["messages-so-far"], row["options-for-correct-answers"]
+      context, utterance = "", ""
       if self.task == "forecast":
-        context = filter_text(row["messages-so-far"][-1]["utterance"]) # example not used if no last context message
+        if history[-1]["speaker"] == "PAD":
+          continue
+        context = filter_text(history[-1]["utterance"])
       else:
-        utterance = filter_text(row["options-for-correct-answers"][0]["utterance"])
-      label = row["options-for-correct-answers"][0]["agg_label"]
-      if utterance or context:
-        examples.append(InputExample(guid=guid, utterance=utterance, context=context, label=label))
+        utterance = filter_text(current[0]["utterance"])
+      label = current[0]["agg_label"] + label_offset[current[0]["speaker"]]
+      examples.append(InputExample(guid=guid, utterance=utterance, context=context, label=label))
     return examples
   
 
@@ -66,19 +85,12 @@ class SingleProcessor(DataProcessor):
       len_examples = len(examples)
       if ex_index % 10000 == 0:
         logger.info("Writing example %d/%d" % (ex_index, len_examples))
-      
-      if self.task == "categorize":
-        inputs =  tokenizer.encode_plus(
-          example.utterance,
-          add_special_tokens=True, 
-          max_length=max_length,
-          pad_to_max_length=True,)
-      else:
-        inputs = tokenizer.encode_plus(
-          example.context, 
-          add_special_tokens=True, 
-          max_length=max_length,
-          pad_to_max_length=True,)
+      text = example.utterance if self.task == "categorize" else example.context
+      inputs =  tokenizer.encode_plus(
+        example.utterance,
+        add_special_tokens=True, 
+        max_length=max_length,
+        pad_to_max_length=True,)
       input_ids, token_type_ids, attention_mask = inputs["input_ids"], inputs["token_type_ids"], inputs["attention_mask"]
 
       if output_mode == "classification":
@@ -90,6 +102,7 @@ class SingleProcessor(DataProcessor):
 
       if ex_index < 5:
         logger.info("*** Example ***")
+        logger.info("%s" % tokenizer.decode(input_ids))
         logger.info("guid: %s" % (example.guid))
         logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
         logger.info("attention_mask: %s" % " ".join([str(x) for x in attention_mask]))

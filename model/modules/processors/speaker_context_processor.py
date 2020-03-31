@@ -15,18 +15,30 @@ class SpeakerContextProcessor(ContextProcessor):
   def _create_examples(self, df):
     """Creates examples for the training and dev sets.
         Task type is either forecasting or categorizing"""
-    agent_ids = np.array([entry[0]["speaker"] == self.agent for entry in df["options-for-correct-answers"]], dtype="bool")
-    df = df.iloc[agent_ids]
+    if self.agent != "both":
+      agent_ids = np.array([entry[0]["speaker"] == self.agent for entry in df["options-for-correct-answers"]], dtype="bool")
+      df = df.iloc[agent_ids]
 
     examples = []
-    speaker_code_dict = {"T": "therapist", "P": "patient", "PAD": ""}
-    for (_index, row) in df.iterrows():
-      guid = row["example-id"]
+    speaker_code_dict = {"T": "therapist", "P": "patient"}
+    for (_index , row) in df.iterrows():
+      guid, history, current = row["example-id"], row["messages-so-far"], row["options-for-correct-answers"]
       utterance = ""
-      context = ["{} : {}".format(speaker_code_dict[row["messages-so-far"][-i]["speaker"]], filter_text(row["messages-so-far"][-i]["utterance"])) 
-        for i in range(self.context_len, 1, -1)]
+      if all([history[i]["speaker"] == "PAD" for i in self.context_range]):
+        context = ["no context"]
+      else:
+        context = ["{}: {}".format(
+          speaker_code_dict[history[i]["speaker"]], 
+          filter_text(history[i]["utterance"])) 
+        for i in self.context_range if history[i]["speaker"] != "PAD"]
       if self.task == "categorize":
-        utterance = filter_text(row["options-for-correct-answers"][0]["utterance"])
-      label = row["options-for-correct-answers"][0]["agg_label"]
+        if self.agent == "both":
+          utterance = "{} utter: {}".format(
+            speaker_code_dict[current[0]["speaker"]], 
+            filter_text(current[0]["utterance"]))
+        else:
+          utterance = "utter: {}".format(
+            filter_text(current[0]["utterance"]))
+      label = current[0]["agg_label"]
       examples.append(InputExample(guid=guid, utterance=utterance, context=context, label=label))
     return examples
