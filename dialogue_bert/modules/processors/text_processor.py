@@ -1,64 +1,82 @@
 import re
 from functools import lru_cache
+import torch
+from torchtext.data import TabularDataset
 from transformers import RobertaTokenizer, BertTokenizer
 
-aliased = {'Pause': 'pause', 'laughs': 'laugh', 
-'chuckles': 'chuckle', 'chuckling': 'chuckle', 'PAUSE': 'pause', 'laughter': 'laugh', 'LAUGHTER': 'laugh',
-'Laughter': 'laugh', 'Silence': 'silence', 'laughing': 'laugh', 'Crosstalk': 'crosstalk', 'unintelligible': 'unclear', 
-'Sigh': 'sigh', 'cross talk': 'crosstalk', 'Sniff': 'sniff', 'Laughing': 'laugh', 'SIGH': 'sigh', 'Unclear': 'unclear',
-'Chuckling': 'chuckle', 'coughs': 'cough', 'Clears throat': 'clear throat', 'sniggers': 'snicker', 'crosstalking': 'crosstalk',
-'sniffles': 'sniff', 'PH': 'ph', 'inaudible at': 'inaudible', 'Long pause': 'long pause', 'sniffling': 'sniff',
-'Sniffles': 'sniff', 'giggles': 'giggle', 'coughing': 'cough', 'sighing': 'sigh', 'sniffs': 'sniff', 'whispers': 'whisper',
-'Sighs': 'sigh', 'Cross talk': 'crosstalk', '3 second pause': 'pause', 'CROSSTALK': 'crosstalk',
-'2 second pause': 'pause', 'whispering': 'whisper', 'Interposing': 'interpose', 'Crying': 'cry', 'Sniffling': 'sniff',
-'cries': 'cry', 'Coughs': 'cough', 'Unintelligible': 'unclear'} 
+speaker_dict = {'P': 'patient', 'T': 'therapist'}
 
-safe_words = set(aliased.values())
-safe_words.add("um")
-safe_words.add("uh")
-safe_words.add("like")
-safe_words.add("laugh")
+@lru_cache(maxsize=100)
+def lru_encode(tokenizer, sentence):
+  return tokenizer.encode(sentence)
 
-@lru_cache(maxsize=50, typed=True)
+@lru_cache(maxsize=100, typed=True)
 def filter_text(text):
-  if not text:
-    return text
-  text_cleaned = re.sub(r"(\[\d*:*\d*\])", "", text) # removed timestamps
-  actions = re.findall(r"(\(.+?\))", text_cleaned) + re.findall(r"(\[.+?\])", text_cleaned)
-  for action in actions:
-    action_word = "".join(x for x in action if x.isalpha())
-    if action_word in aliased:
-      text_cleaned = text_cleaned.replace(action, "( {} )".format(aliased.get(action_word, action_word)))
-    elif action_word in safe_words:
-      text_cleaned = text_cleaned.replace(action, "( {} )".format(action_word))
-    else:
-      text_cleaned = text_cleaned.replace(action, "")
-  return text_cleaned.strip()
-
-def encode_context(context, utterance_encode_len, max_len, etc_tokens, tokenizer):
-  '''<s> hello what is up with you</s></s> I am fine</s>'''
-  # note the spaces
-  if isinstance(tokenizer, RobertaTokenizer):
-    max_con_length, leftover = (max_len - utterance_encode_len) // len(context), 0
-    for idx, con in enumerate(context):
-      con_encoded = (
-        ([tokenizer.bos_token_id] if idx == 0 else []) + 
-        tokenizer.encode(con, add_special_tokens=False))
-      if len(con_encoded) < max_con_length:
-        leftover += max_con_length - len(con_encoded)
+    text = re.sub(r"(\[\d*:*\d*\])", "", text) # removed timestamps
+    paren_matches = re.findall(r"(\(.+?\))", text) + re.findall(r"(\[.+?\])", text)
+    for match in paren_matches:
+      t = match[1:-1].strip() # don't want the open and close braces  
+      if len(t.split()) == 1 and t != 'du' and t != 'sp': # this is a code
+        text = text.replace(match, "( {} )".format(t)) # add only the first verb lemmatized in the sequence
       else:
-        con_encoded = (
-          [con_encoded[0]] +
-          etc_tokens +
-          con_encoded[1: min(max_con_length + leftover, len(con_encoded)-1)])
-        leftover = max(0, leftover - (max_con_length - len(con_encoded)))
-      
-      if idx == 0:
-        assert (con_encoded[0] == tokenizer.bos_token_id)
-      con_decoded = tokenizer.decode(con_encoded)
-      context[idx] = con_decoded
+        text = text.replace(match, "")
+    return re.sub(r'\[\]|\(\)', '', text).strip() # remove unnecessary tags and spaces
 
-  '''<s>[CLS] hello what is up with you [SEP]'''
-  if isinstance(tokenizer, BertTokenizer):
-    raise NotImplementedError()
-  return ''.join(context)
+class PsychDataset(torch.utils.data.Dataset):
+  def __init__(self, tabular_dataset):
+    if isinstance(tabular_dataset, list):
+      self.data = tabular_dataset
+    elif isinstance(tabular_dataset, TabularDataset):
+      self.data = [{**tabular_dataset[i].__dict__['context'], 
+                    **tabular_dataset[i].__dict__['utterance']} for i in range(len(tabular_dataset))]
+    else:
+      raise NotImplementedError()
+
+  def __len__(self):
+    return len(self.data)
+  
+  def __getitem__(self, index):
+    return self.data[index]
+  
+  def __add__(self, other):
+    return self.data + other.data
+  
+  @staticmethod
+  def load(file):
+    return PsychDataset(torch.load(file))
+  
+  @staticmethod
+  def save(dataset, directory):
+    torch.save(dataset.data, directory) 
+
+
+def utterance_processor(tokenizer):
+  def _closure(x):
+    x = x[0]
+    x['utterance'] = filter_text(x['utterance'])
+    return {'utterance': x['utterance'], 
+            'utterance_encoded': tokenizer.encode(x['utterance']) if x['utterance'] else [],
+            'utterance_speaker': x['speaker'],
+            'utterance_label': x['agg_label'],
+            'utterance_uid': x['uid']}
+  return _closure
+
+def context_processor(tokenizer):
+  def _closure(x):
+    context = []
+    context_encoded = []
+    speaker = []
+
+    for turn in x:
+      if turn['speaker'] == 'PAD':
+        continue
+      turn['utterance'] = filter_text(turn['utterance'])
+      if turn['utterance']: # could be empty
+        context.append(turn['utterance'])
+        context_encoded.append(lru_encode(tokenizer, turn['utterance']))
+        speaker.append(turn['speaker'])
+
+    return {'context': context, 
+            'context_encoded': context_encoded,
+            'context_speaker': speaker}
+  return _closure
