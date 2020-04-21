@@ -1,0 +1,9 @@
+MI_adherent = 0.0
+MI_non-adherent = 0.02278893109061313
+facilitate = 0.0
+giving_info = 0.0
+macro = 0.018331247365825504
+question_closed = 0.0
+question_open = 0.12386104783599089
+reflection_complex = 0.0
+reflection_simple = 0.0
