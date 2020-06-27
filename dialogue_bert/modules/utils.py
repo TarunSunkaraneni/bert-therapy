@@ -4,6 +4,10 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import json
+import dataclasses
+import random
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -35,23 +39,24 @@ class FocalLoss(nn.Module):
     return loss.sum(dim=1).mean()
 
 processors = {
-  "categorize-both-speaker-dialogue-roberta": SpeakerContextProcessor(
+  "categorize-both": SpeakerContextProcessor(
     {"P": MISC11_P_labels, 
      "T": MISC11_T_labels}, 
-    "categorize", 
+    task="categorize", 
+    agent=None,
     context_len=9),
-  "categorize-both-speaker-conversational-bert": SpeakerContextProcessor(
+  "categorize-therapist": SpeakerContextProcessor(
     {"P": MISC11_P_labels, 
      "T": MISC11_T_labels}, 
-    "categorize", 
+    task="categorize", 
+    agent="therapist",
     context_len=9),
-  "categorize-both-speaker-conversational-bert-fl": SpeakerContextProcessor(
+  "categorize-patient": SpeakerContextProcessor(
     {"P": MISC11_P_labels, 
       "T": MISC11_T_labels}, 
-    "categorize", 
-    context_len=9,
-    loss_function= FocalLoss([1.0, 1.0, 0.25, 0.5, 1.0, 1.0, 1.0, 0.75, 0.75, 1.0, 1.0], gamma=1.0)
-  )
+    task="categorize", 
+    agent="patient",
+    context_len=9)
 }
 
 def compute_metrics(preds, labels, label_names):
@@ -70,3 +75,21 @@ def logits_masked(logits, labels, task_name):
   m_logits[(labels < s).view((-1, )), s:]= -10000
   m_logits[(labels >= s).view((-1, )), :s] = -10000
   return m_logits
+
+def set_seed(args):
+  random.seed(args.seed)
+  np.random.seed(args.seed)
+  torch.manual_seed(args.seed)
+  if args.n_gpu > 0:
+    torch.cuda.manual_seed_all(args.seed)
+
+def add_special_tokens(model, tokenizer, processor, copy_sep=True):
+  """ Add special tokens to the tokenizer and the model if they have not already been added. """
+  num_added_tokens = tokenizer.add_special_tokens({
+    'additional_special_tokens': processor.additional_tokens
+  }) # doesn't add if they are already there
+  embeddings = model.resize_token_embeddings(len(tokenizer)) # doesn't mess with existing tokens
+  assert(embeddings.num_embeddings == len(tokenizer))
+  if copy_sep:
+    for i in range(num_added_tokens):
+      embeddings.weight.data[-i, :] = embeddings.weight.data[tokenizer.sep_token_id, :]

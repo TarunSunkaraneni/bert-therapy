@@ -18,7 +18,7 @@ from transformers import (MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING,
 
 from arguments import argparser
 from processors.text_processor import PsychDataset
-from utils import compute_metrics, logits_masked, processors
+from utils import compute_metrics, logits_masked, processors, set_seed, add_special_tokens
 
 try:
   from torch.utils.tensorboard import SummaryWriter
@@ -30,28 +30,14 @@ logger = logging.getLogger(__name__)
 symbol_dict = dict()
 
 
-def set_seed(args):
-  random.seed(args.seed)
-  np.random.seed(args.seed)
-  torch.manual_seed(args.seed)
-  if args.n_gpu > 0:
-    torch.cuda.manual_seed_all(args.seed)
-
-def _add_special_tokens(model, tokenizer, processor, copy_sep=True):
-  """ Add special tokens to the tokenizer and the model if they have not already been added. """
-  num_added_tokens = tokenizer.add_special_tokens({
-    'additional_special_tokens': processor.additional_tokens
-  }) # doesn't add if they are already there
-  embeddings = model.resize_token_embeddings(len(tokenizer)) # doesn't mess with existing tokens
-  assert(embeddings.num_embeddings == len(tokenizer))
-  if copy_sep:
-    for i in range(num_added_tokens):
-      embeddings.weight.data[-i, :] = embeddings.weight.data[tokenizer.sep_token_id, :]
-
 def train(model, tokenizer, train_dataset, processor, args):
   """ Train the model """
+
+  ### Get train Dataloader
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
+  else:
+    tb_writer = None
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -59,16 +45,20 @@ def train(model, tokenizer, train_dataset, processor, args):
     train_dataset, 
     sampler=train_sampler,
     batch_size=args.train_batch_size, 
-    collate_fn=processor.collate(return_token_type_ids=True),
+    collate_fn=processor.collate(return_token_type_ids=False),
   )
 
+  ## Calculate training steps
   if args.max_steps > 0:
     t_total = args.max_steps
-    args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
+    args.num_train_epochs = (
+      args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
+    )
   else:
     t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+    num_train_epochs = args.num_train_epochs
 
-  # Prepare optimizer and schedule (linear warmup and decay)
+  ## Prepare optimizer and schedule (linear warmup and decay)
   no_decay = ["bias", "LayerNorm.weight"]
   optimizer_grouped_parameters = [
     {
@@ -83,13 +73,17 @@ def train(model, tokenizer, train_dataset, processor, args):
     optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
   )
 
-  # Check if saved optimizer or scheduler states exist
-  if os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) and os.path.isfile(
-    os.path.join(args.model_name_or_path, "scheduler.pt")
+  #@ Check if saved optimizer or scheduler states exist
+  if (
+    args.model_path
+    and os.path.isfile(os.path.join(args.model_path, "optimizer.pt")) 
+    and os.path.isfile(os.path.join(args.model_path, "scheduler.pt"))
   ):
     # Load in optimizer and scheduler states
-    optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt")))
-    scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt")))
+    optimizer.load_state_dict(
+      torch.load(os.path.join(model_path, "optimizer.pt"), map_location=args.device)
+    )
+    scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
 
   if args.fp16:
     try:
@@ -104,40 +98,45 @@ def train(model, tokenizer, train_dataset, processor, args):
 
   if args.local_rank != -1:
     model = torch.nn.parallel.DistributedDataParallel(
-      model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True,
+      model, 
+      device_ids=[args.local_rank],
+      output_device=args.local_rank, 
+      find_unused_parameters=True,
     )
 
+  total_train_batch_size =  (args.train_batch_size
+    * args.gradient_accumulation_steps
+    * (torch.distributed.get_world_size() if args.local_rank != -1 else 1)
+  )
   # Train!
   logger.info("***** Running training *****")
   logger.info("  Num examples = %d", len(train_dataset))
   logger.info("  Num Epochs = %d", args.num_train_epochs)
   logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
-  logger.info(
-    "  Total train batch size (w. parallel, distributed & accumulation) = %d",
-    args.train_batch_size
-    * args.gradient_accumulation_steps
-    * (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
-  )
+  logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d", total_train_batch_size)
   logger.info("  Total optimization steps = %d", t_total)
 
   global_step = 0
   epochs_trained = 0
   steps_trained_in_current_epoch = 0
   # Check if continuing training from a checkpoint
-  if os.path.exists(args.model_name_or_path):
+  if os.path.exists(args.model_path):
     # set global_step to gobal_step of last saved checkpoint from model path
     try:
-      global_step = int(args.model_name_or_path.split("-")[-1].split("/")[0])
+      global_step = int(args.model_path.split("-")[-1].split("/")[0])
+      epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
+      steps_trained_in_current_epoch = global_step % (
+        len(train_dataloader) // args.gradient_accumulation_steps
+      )
+
+      logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+      logger.info("  Continuing training from epoch %d", epochs_trained)
+      logger.info("  Continuing training from global step %d", global_step)
+      logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
     except ValueError:
       global_step = 0
-    epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
-    steps_trained_in_current_epoch = global_step % (len(train_dataloader) // args.gradient_accumulation_steps)
-
-    logger.info("  Continuing training from checkpoint, will skip to saved global_step")
-    logger.info("  Continuing training from epoch %d", epochs_trained)
-    logger.info("  Continuing training from global step %d", global_step)
-    logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+      logger.info("  Starting fine-tuning.")
 
   tr_loss, logging_loss = 0.0, 0.0
   model.zero_grad()
@@ -146,7 +145,7 @@ def train(model, tokenizer, train_dataset, processor, args):
   )
   set_seed(args)  # Added here for reproductibility
 
-  for _ in train_iterator:
+  for epoch in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, batch in enumerate(epoch_iterator):
 
@@ -155,6 +154,7 @@ def train(model, tokenizer, train_dataset, processor, args):
         steps_trained_in_current_epoch -= 1
         continue
 
+      ## Training step
       model.train()
       batch = {key: input_tensor.to(args.device) for key, input_tensor in batch.items()}
       inputs = {k: v for k, v in batch.items() if k != "labels"}
@@ -176,8 +176,9 @@ def train(model, tokenizer, train_dataset, processor, args):
           scaled_loss.backward()
       else:
         loss.backward()
-
       tr_loss += loss.item()
+
+      ## Post processing
       if (step + 1) % args.gradient_accumulation_steps == 0 or (
         # last step in epoch but step is always smaller than gradient_accumulation_steps
         len(epoch_iterator) <= args.gradient_accumulation_steps
@@ -260,7 +261,7 @@ def evaluate(model, tokenizer, processor, mode, args, prefix=""):
     eval_dataset, 
     sampler=eval_sampler, 
     batch_size=args.eval_batch_size, 
-    collate_fn=processor.collate(return_token_type_ids=True))
+    collate_fn=processor.collate(return_token_type_ids=False))
 
   # multi-gpu eval
   if args.n_gpu > 1 and not isinstance(model, torch.nn.DataParallel):
@@ -325,7 +326,7 @@ def load_and_cache_examples(tokenizer, mode, args):
     args.data_dir,
     "cached_{}_{}_{}_{}".format(
       mode,
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
+      list(filter(None, args.model_path.split("/"))).pop(),
       str(args.max_seq_length),
       str(task),
     ),
@@ -415,30 +416,23 @@ def main():
 
   args.model_type = args.model_type.lower()
   config = AutoConfig.from_pretrained(
-    args.config_name if args.config_name else args.model_name_or_path,
+    args.config_name if args.config_name else args.model_path,
     num_labels=num_labels,
     finetuning_task=args.task_name,
     cache_dir=args.cache_dir if args.cache_dir else None
   )
   tokenizer = AutoTokenizer.from_pretrained(
-    args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
+    args.tokenizer_name if args.tokenizer_name else args.model_path,
     do_lower_case=args.do_lower_case,
     cache_dir=args.cache_dir if args.cache_dir else None,
   )
   model = AutoModelForSequenceClassification.from_pretrained(
-    args.model_name_or_path,
+    args.model_path,
     config=config,
     cache_dir=args.cache_dir if args.cache_dir else None,
   )
 
-  _add_special_tokens(model, tokenizer, processor)
-  # symbol_dict.update({
-  #   'SPECIAL_START_TOKEN_IDS': set(tokenizer.convert_tokens_to_ids(ATTR_TO_SPECIAL_TOKEN['additional_special_tokens'])[:3]),
-  #   'SPECIAL_END_TOKEN_IDS': set(tokenizer.convert_tokens_to_ids(ATTR_TO_SPECIAL_TOKEN['additional_special_tokens'])[3:]),
-  #   'BOS_TOKEN_ID': tokenizer.bos_token_id,
-  #   'EOS_TOKEN_ID': tokenizer.eos_token_id,
-  #   'PAD_TOKEN_ID': tokenizer.pad_token_id
-  # })
+  add_special_tokens(model, tokenizer, processor)
 
   if args.local_rank == 0:
     torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab

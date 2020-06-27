@@ -4,14 +4,24 @@ import torch
 from torchtext.data import TabularDataset
 from transformers import RobertaTokenizer, BertTokenizer
 
-speaker_dict = {'P': 'patient', 'T': 'therapist'}
-
-@lru_cache(maxsize=100)
-def lru_encode(tokenizer, sentence):
-  return tokenizer.encode(sentence)
+def lru_encode(tokenizer):
+  @lru_cache(maxsize=100)
+  def _closure(sentence):
+    return tokenizer.encode(sentence)
+  return _closure
 
 @lru_cache(maxsize=100, typed=True)
 def filter_text(text):
+    text = re.sub(r"(\[\d*:*\d*\])", "", text) # removed timestamps
+    paren_matches = re.findall(r"(\(.+?\))", text) + re.findall(r"(\[.+?\])", text)
+    for match in paren_matches:
+      t = match[1:-1].strip() # don't want the open and close braces
+      if len(t.split()) <= 2 and t not in {'du', 'sp'}: # this is a code
+        text = text.replace(match, "( {} )".format(t)) # add only the first verb lemmatized in the sequence
+      else:
+        text = text.replace(match, "")
+    return re.sub(r'\[\]|\(\)', '', text).strip() # remove unnecessary tags and spaces
+
     text = re.sub(r"(\[\d*:*\d*\])", "", text) # removed timestamps
     paren_matches = re.findall(r"(\(.+?\))", text) + re.findall(r"(\[.+?\])", text)
     for match in paren_matches:
@@ -50,18 +60,24 @@ class PsychDataset(torch.utils.data.Dataset):
     torch.save(dataset.data, directory) 
 
 
-def utterance_processor(tokenizer):
+def utterance_processor(tokenizer, speaker=None):
   def _closure(x):
     x = x[0]
-    x['utterance'] = filter_text(x['utterance'])
-    return {'utterance': x['utterance'], 
-            'utterance_encoded': tokenizer.encode(x['utterance']) if x['utterance'] else [],
+    utterance = filter_text(x['utterance'])
+    if utterance and (speaker == None or speaker == x['speaker']):
+      utterance_encoded = tokenizer.encode(utterance)
+    else:
+      utterance = ''
+      utterance_encoded = []
+    return {'utterance': utterance, 
+            'utterance_encoded': utterance_encoded,
             'utterance_speaker': x['speaker'],
             'utterance_label': x['agg_label'],
             'utterance_uid': x['uid']}
   return _closure
 
 def context_processor(tokenizer):
+  encode_fn = lru_encode(tokenizer)
   def _closure(x):
     context = []
     context_encoded = []
@@ -73,7 +89,7 @@ def context_processor(tokenizer):
       turn['utterance'] = filter_text(turn['utterance'])
       if turn['utterance']: # could be empty
         context.append(turn['utterance'])
-        context_encoded.append(lru_encode(tokenizer, turn['utterance']))
+        context_encoded.append(encode_fn(turn['utterance']))
         speaker.append(turn['speaker'])
 
     return {'context': context, 

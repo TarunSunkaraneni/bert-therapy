@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 
 class SpeakerContextProcessor(DataProcessor):
 
-  def __init__(self, label_dict, task, context_len=9, loss_function=None):
+  def __init__(self, label_dict, task, context_len=9, agent=None, loss_function=None):
     assert task == "forecast" or task == "categorize"
+    assert agent == None or agent == "therapist" or agent == "patient"
     assert context_len > 0
 
     self.flattened_labels = reduce(lambda a,b: a+b, label_dict.values())
@@ -27,6 +28,7 @@ class SpeakerContextProcessor(DataProcessor):
     self.label_dict['_SEP'] = len(next(iter(label_dict.values()))) 
     self.context_len = context_len
     self.task = task
+    self.agent = agent
     self.additional_tokens = ["<P>", "<T>", "<U>"]
     self.additional_token_ids = {}
     if loss_function != None:
@@ -40,11 +42,11 @@ class SpeakerContextProcessor(DataProcessor):
 
   def _create_examples(self, tokenizer, data_dir):
     return PsychDataset(data.TabularDataset(data_dir, 'json', 
-                          {'options-for-correct-answers': ('utterance', data.RawField(utterance_processor(tokenizer))),
+                          {'options-for-correct-answers': ('utterance', data.RawField(utterance_processor(tokenizer, speaker=self.agent[0].upper() if self.agent else None))),
                            'messages-so-far': ('context', data.RawField(context_processor(tokenizer)))}))
   
   def convert_examples_to_features(self, dataset, tokenizer):
-    empty_context = tokenizer.encode('no context')
+    empty_context = tokenizer.encode('N/A')
     examples = []
 
     for token in self.additional_tokens:
@@ -61,7 +63,7 @@ class SpeakerContextProcessor(DataProcessor):
         continue 
       if isinstance(tokenizer, RobertaTokenizer):
         if not example['context_encoded']:
-          example['context_encoded'] = empty_context # <s> no context </s>
+          example['context_encoded'] = empty_context # <s> N/A </s>
         else:
           # select the last c context messages and speakers
           example['context_encoded'] = (np.array(example['context_encoded'])[-self.context_len:]).tolist()

@@ -17,7 +17,7 @@ def argparser():
     help="Model type",
   )
   parser.add_argument(
-    "--model_name_or_path",
+    "--model_path",
     default=None,
     type=str,
     required=True,
