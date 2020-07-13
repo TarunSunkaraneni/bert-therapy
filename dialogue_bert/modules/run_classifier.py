@@ -81,9 +81,9 @@ def train(model, tokenizer, train_dataset, processor, args):
   ):
     # Load in optimizer and scheduler states
     optimizer.load_state_dict(
-      torch.load(os.path.join(model_path, "optimizer.pt"), map_location=args.device)
+      torch.load(os.path.join(args.model_path, "optimizer.pt"), map_location=args.device)
     )
-    scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
+    scheduler.load_state_dict(torch.load(os.path.join(args.model_path, "scheduler.pt")))
 
   if args.fp16:
     try:
@@ -133,7 +133,7 @@ def train(model, tokenizer, train_dataset, processor, args):
       logger.info("  Continuing training from checkpoint, will skip to saved global_step")
       logger.info("  Continuing training from epoch %d", epochs_trained)
       logger.info("  Continuing training from global step %d", global_step)
-      logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+      logger.info("  Will skip the first %d steps in the epoch", steps_trained_in_current_epoch)
     except ValueError:
       global_step = 0
       logger.info("  Starting fine-tuning.")
@@ -162,10 +162,7 @@ def train(model, tokenizer, train_dataset, processor, args):
       outputs = model(**inputs)
       logits, labels = outputs[0], batch["labels"]  # model outputs are always tuple in transformers (see doc)
       m_logits = logits_masked(logits, labels, args.task_name)
-      if hasattr(processor, 'loss_function'):
-        loss = processor.loss_function(m_logits, labels)
-      else:
-        loss = F.cross_entropy(m_logits, labels)
+      loss = F.cross_entropy(m_logits, labels)
       if args.n_gpu > 1:
         loss = loss.mean()  # mean() to average on multi-gpu parallel training
       if args.gradient_accumulation_steps > 1:
@@ -215,23 +212,7 @@ def train(model, tokenizer, train_dataset, processor, args):
           print(json.dumps({**logs, **{"step": global_step}}))
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-          # Save model checkpoint
-          output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-          if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-          model_to_save = (
-            model.module if hasattr(model, "module") else model
-          )  # Take care of distributed/parallel training
-          model_to_save.save_pretrained(output_dir)
-          tokenizer.save_pretrained(output_dir)
-
-          torch.save(args, os.path.join(output_dir, "training_args.bin"))
-          logger.info("Saving model checkpoint to %s", output_dir)
-
-          torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-          torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-          logger.info("Saving optimizer and scheduler states to %s", output_dir)
-
+          save(model, optimizer, scheduler, global_step, args)
       if args.max_steps > 0 and global_step > args.max_steps:
         epoch_iterator.close()
         break
@@ -244,6 +225,22 @@ def train(model, tokenizer, train_dataset, processor, args):
 
   return global_step, tr_loss / global_step
 
+def save(model, optimizer, scheduler, global_step, args):
+  # Save model checkpoint
+  output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
+  if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+  model_to_save = (
+    model.module if hasattr(model, "module") else model
+  )  # Take care of distributed/parallel training
+  model_to_save.save_pretrained(output_dir)
+
+  torch.save(args, os.path.join(output_dir, "training_args.bin"))
+  logger.info("Saving model checkpoint to %s", output_dir)
+
+  torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+  torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+  logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 def evaluate(model, tokenizer, processor, mode, args, prefix=""):
   eval_output_dir = args.output_dir
@@ -283,10 +280,7 @@ def evaluate(model, tokenizer, processor, mode, args, prefix=""):
       outputs = model(**inputs)
       logits, labels = outputs[0], batch["labels"]  # model outputs are always tuple in transformers (see doc)
       m_logits = logits_masked(logits, labels, args.task_name)
-      if hasattr(processor, 'loss_function'):
-        tmp_eval_loss = processor.loss_function(m_logits, labels)
-      else:
-        tmp_eval_loss = F.cross_entropy(m_logits, labels)
+      tmp_eval_loss = F.cross_entropy(m_logits, labels)
       eval_loss += tmp_eval_loss.mean().item()
     
     inputs["labels"] = labels # For the segment of code below
@@ -439,7 +433,7 @@ def main():
   model.to(args.device)
 
   logger.info("Training/evaluation parameters %s", args)
-
+  
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(tokenizer, "train", args)

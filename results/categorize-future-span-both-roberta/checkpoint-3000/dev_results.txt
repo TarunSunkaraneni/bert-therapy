@@ -1,0 +1,12 @@
+MI_adherent = 0.017937219730941707
+MI_non-adherent = 0.0
+change_talk = 0.0
+facilitate = 0.2268440145102781
+follow_neutral = 0.5379703844586333
+giving_info = 0.17285945072697903
+macro = 0.09388652882054847
+question_closed = 0.003389830508474576
+question_open = 0.030349013657056143
+reflection_complex = 0.03536977491961415
+reflection_simple = 0.008032128514056224
+sustain_talk = 0.0

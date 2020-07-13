@@ -11,38 +11,18 @@ import torchtext.data as data
 from transformers import RobertaTokenizer, BertTokenizer
 from transformers.data.processors.utils import DataProcessor
 
+from .speaker_context_processor import SpeakerContextProcessor
 from .text_processor import (PsychDataset, context_processor, filter_text,
                              lru_encode, utterance_processor)
 
 logger = logging.getLogger(__name__)
 
-class SpeakerContextProcessor(DataProcessor):
+class SpeakerSpanContextProcessor(SpeakerContextProcessor):
 
   def __init__(self, label_dict, task, context_len=9, agent=None):
-    assert task == "forecast" or task == "categorize"
-    assert agent == None or agent == "therapist" or agent == "patient"
-    assert context_len > 0
+    super().__init__(label_dict, task, context_len=9, agent=None)
+    self.additional_tokens = ["<P>", "<T>", "<U>", "</P>", "</T>", "</U>"]
 
-    self.flattened_labels = reduce(lambda a,b: a+b, label_dict.values())
-    self.label_dict = dict(zip(self.flattened_labels, range(len(self.flattened_labels))))
-    self.label_dict['_SEP'] = len(next(iter(label_dict.values()))) 
-    self.context_len = context_len
-    self.task = task
-    self.agent = agent
-    self.additional_tokens = ["<P>", "<T>", "<U>"]
-    self.additional_token_ids = {}
-
-  def get_examples(self, tokenizer, data_dir, name):
-    return self._create_examples(tokenizer, os.path.join(data_dir, "{}.json".format(name)))
-  
-  def get_labels(self):
-    return self.flattened_labels
-
-  def _create_examples(self, tokenizer, data_dir):
-    return PsychDataset(data.TabularDataset(data_dir, 'json', 
-                          {'options-for-correct-answers': ('utterance', data.RawField(utterance_processor(tokenizer, speaker=self.agent[0].upper() if self.agent else None))),
-                           'messages-so-far': ('context', data.RawField(context_processor(tokenizer)))}))
-  
   def convert_examples_to_features(self, dataset, tokenizer):
     empty_context = tokenizer.encode('N/A')
     examples = []
@@ -70,6 +50,11 @@ class SpeakerContextProcessor(DataProcessor):
           # keep the start token for the first context message
           for idx in range(len(example['context_encoded'])):
             example['context_encoded'][idx][0] = self.additional_token_ids[f"<{example['context_speaker'][idx]}>"]
+            example['context_encoded'][idx] = (
+              example['context_encoded'][idx][:-1] +
+              [self.additional_token_ids[f"</{example['context_speaker'][idx]}>"]] + 
+              [example['context_encoded'][idx][-1]]
+            )
             if idx == 0:
               example['context_encoded'][idx] = (
                 [tokenizer.bos_token_id] + 
@@ -85,8 +70,12 @@ class SpeakerContextProcessor(DataProcessor):
           # add the utterance token as well, get rid of the utterance start token
           example['utterance_encoded'] = (
             [tokenizer.sep_token_id] +  
+            [self.additional_token_ids['<U>']] + 
             [self.additional_token_ids[f"<{example['utterance_speaker']}>"]] + 
-            [self.additional_token_ids['<U>']] + example['utterance_encoded'][1:]
+            example['utterance_encoded'][1:-1] +
+            [self.additional_token_ids[f"</{example['utterance_speaker']}>"]] +
+            [self.additional_token_ids['</U>']] +
+            [tokenizer.eos_token_id]
           )
       elif isinstance(tokenizer, BertTokenizer):
         if not example['context_encoded']:
@@ -99,6 +88,11 @@ class SpeakerContextProcessor(DataProcessor):
           # keep the start token for the first context message
           for idx in range(len(example['context_encoded'])):
             example['context_encoded'][idx][0] = self.additional_token_ids[f"<{example['context_speaker'][idx]}>"]
+            example['context_encoded'][idx] = (
+              example['context_encoded'][idx][:-1] +
+              [self.additional_token_ids[f"</{example['context_speaker'][idx]}>"]] + 
+              [example['context_encoded'][idx][-1]]
+            )
             if idx == 0:
               example['context_encoded'][idx] = (
                 [tokenizer.cls_token_id] + 
@@ -113,8 +107,12 @@ class SpeakerContextProcessor(DataProcessor):
         else:
           # add the utterance token as well, get rid of the utterance start token
           example['utterance_encoded'] = (
+            [self.additional_token_ids['<U>']] + 
             [self.additional_token_ids[f"<{example['utterance_speaker']}>"]] + 
-            [self.additional_token_ids['<U>']] + example['utterance_encoded'][1:]
+            example['utterance_encoded'][1:-1] +
+            [self.additional_token_ids[f"</{example['utterance_speaker']}>"]] +
+            [self.additional_token_ids['</U>']] +
+            [tokenizer.sep_token_id]
           )
       else:
         raise NotImplementedError(f"Haven't implemented logic for {type(tokenizer)}")
@@ -134,33 +132,6 @@ class SpeakerContextProcessor(DataProcessor):
       examples.append(example)
     return PsychDataset(examples)
 
-  """
-    This method is used to convert the sparse batch into tensors which will be fed to the model.
-  """
-  @staticmethod
-  def collate(return_token_type_ids=False):
-    def _closure(batch):
-      lengths = [len(example["context_encoded"]) + len(example["utterance_encoded"]) for example in batch]
-      input_ids = torch.zeros([len(batch), max(lengths)], dtype=torch.long)
-      attention_mask = torch.zeros_like(input_ids, dtype=torch.long)
-      if return_token_type_ids:
-          token_type_ids = torch.zeros_like(input_ids, dtype=torch.long)
-
-      for idx, example in enumerate(batch):
-          input_ids[idx, :lengths[idx]] = torch.LongTensor(example["context_encoded"] + example["utterance_encoded"])
-          attention_mask[idx, :lengths[idx]] = 1
-          if return_token_type_ids:
-              token_type_ids[idx, lengths[idx]-len(example["utterance_encoded"]): lengths[idx]] = 1
-      labels = torch.LongTensor([seq["utterance_label"] for seq in batch])
-      ret_dict = {
-          "input_ids": input_ids,
-          "attention_mask": attention_mask,
-          "labels": labels
-      }
-      if return_token_type_ids:
-          ret_dict["token_type_ids"] = token_type_ids
-      return ret_dict
-    return _closure
 
   # def generate_dialogue_attention_mask(self, batch):
   # mask = -10000 * torch.ones((batch.shape[0], batch.shape[1], batch.shape[1])) # 12 heads is fixed

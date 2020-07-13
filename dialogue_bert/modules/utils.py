@@ -1,5 +1,7 @@
 from sklearn.metrics import f1_score
 from processors.speaker_context_processor import SpeakerContextProcessor
+from processors.speaker_span_context_processor import SpeakerSpanContextProcessor
+from processors.future_span_context_processor import FutureSpanContextProcessor
 import logging
 import torch
 import torch.nn as nn
@@ -39,13 +41,42 @@ class FocalLoss(nn.Module):
     return loss.sum(dim=1).mean()
 
 processors = {
-  "categorize-both": SpeakerContextProcessor(
+  "categorize-both-9": SpeakerContextProcessor(
     {"P": MISC11_P_labels, 
      "T": MISC11_T_labels}, 
     task="categorize", 
     agent=None,
     context_len=9),
-  "categorize-therapist": SpeakerContextProcessor(
+  "categorize-span-both-9": SpeakerSpanContextProcessor(
+    {"P": MISC11_P_labels, 
+     "T": MISC11_T_labels}, 
+    task="categorize", 
+    agent=None,
+    context_len=9),
+  "categorize-span-both-4": SpeakerSpanContextProcessor(
+    {"P": MISC11_P_labels, 
+     "T": MISC11_T_labels}, 
+    task="categorize", 
+    agent=None,
+    context_len=4),
+  "categorize-future-span-both": FutureSpanContextProcessor(
+    {"P": MISC11_P_labels, 
+     "T": MISC11_T_labels}, 
+    task="categorize", 
+    agent=None,
+    context_len=9,
+    future=2),
+  "categorize-future-span-both-4-2": FutureSpanContextProcessor(
+    {"P": MISC11_P_labels, 
+     "T": MISC11_T_labels}, 
+    task="categorize", 
+    agent=None,
+    context_len=4,
+    future=2)
+}
+
+"""
+"categorize-therapist": SpeakerContextProcessor(
     {"P": MISC11_P_labels, 
      "T": MISC11_T_labels}, 
     task="categorize", 
@@ -56,8 +87,33 @@ processors = {
       "T": MISC11_T_labels}, 
     task="categorize", 
     agent="patient",
-    context_len=9)
-}
+    context_len=9),
+  "categorize-span-therapist": SpeakerSpanContextProcessor(
+    {"P": MISC11_P_labels, 
+     "T": MISC11_T_labels}, 
+    task="categorize", 
+    agent="therapist",
+    context_len=9),
+  "categorize-span-patient": SpeakerSpanContextProcessor(
+    {"P": MISC11_P_labels, 
+      "T": MISC11_T_labels}, 
+    task="categorize", 
+    agent="patient",
+    context_len=9),
+
+"""
+"""
+categorize-*: 
+  <s><T> right</s>
+    </s><T> mm-hmm</s>
+    </s> <P> my job wants me to fly down to atlanta next week and i just don’t think i’m ready for that </s>
+    </s><T> mm-hmm </s>
+    </s><P><U> yes 
+  </s>
+
+categorize-span:
+
+"""
 
 def compute_metrics(preds, labels, label_names):
   results = {"macro": f1_score(labels, preds, average="macro")}

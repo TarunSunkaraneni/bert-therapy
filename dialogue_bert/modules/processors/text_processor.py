@@ -22,16 +22,6 @@ def filter_text(text):
         text = text.replace(match, "")
     return re.sub(r'\[\]|\(\)', '', text).strip() # remove unnecessary tags and spaces
 
-    text = re.sub(r"(\[\d*:*\d*\])", "", text) # removed timestamps
-    paren_matches = re.findall(r"(\(.+?\))", text) + re.findall(r"(\[.+?\])", text)
-    for match in paren_matches:
-      t = match[1:-1].strip() # don't want the open and close braces  
-      if len(t.split()) == 1 and t != 'du' and t != 'sp': # this is a code
-        text = text.replace(match, "( {} )".format(t)) # add only the first verb lemmatized in the sequence
-      else:
-        text = text.replace(match, "")
-    return re.sub(r'\[\]|\(\)', '', text).strip() # remove unnecessary tags and spaces
-
 class PsychDataset(torch.utils.data.Dataset):
   def __init__(self, tabular_dataset):
     if isinstance(tabular_dataset, list):
@@ -81,6 +71,7 @@ def context_processor(tokenizer):
   def _closure(x):
     context = []
     context_encoded = []
+    context_labels = []
     speaker = []
 
     for turn in x:
@@ -89,10 +80,12 @@ def context_processor(tokenizer):
       turn['utterance'] = filter_text(turn['utterance'])
       if turn['utterance']: # could be empty
         context.append(turn['utterance'])
+        context_labels.append(turn['agg_label'])
         context_encoded.append(encode_fn(turn['utterance']))
         speaker.append(turn['speaker'])
 
     return {'context': context, 
             'context_encoded': context_encoded,
+            'context_labels': context_labels,
             'context_speaker': speaker}
   return _closure
